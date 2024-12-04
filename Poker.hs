@@ -3,6 +3,7 @@ module Poker where
     import System.Random
     import Data.List
     import Data.Ord (comparing)
+    import Control.Monad 
 
     -- Step1
     -- types 
@@ -10,15 +11,16 @@ module Poker where
     data Rank = Two | Three | Four | Five | Six | Seven | Eight | Nine | Ten | Jack | Queen | King | Ace  deriving (Show, Eq, Ord, Enum, Bounded)
     type Card = (Suit, Rank)
     type Deck = [Card]
-    type Chip = Int
+    newtype Chip = Chip Int deriving (Show, Eq, Ord)
 
     --type Community = [Card]
-
+    data PlayerType = RandomPlayer | AggressivePlayer | PassivePlayer | SmartPlayer deriving (Show, Eq)
     type Hand = [Card]
-    data Player = Player {name :: String, hand :: Hand, chip :: Chip, isDealer :: Bool}
+    data Player = Player {name :: String, hand :: Hand, chip :: Chip, 
+    isDealer :: Bool, playerType :: PlayerType} deriving (Show, Eq)
 
-    data GameState = GameState {activePlayers :: [Player], deck :: Deck, communityCards :: [Card], 
-    pot :: Chip, bets :: [Chip], dealer :: Int, sb :: Int, bb :: Int}
+    data GameState = GameState {activePlayers :: [Player], deck :: Deck, 
+    communityCards :: [Card], pot :: Chip, bets :: [Chip], dealer :: Int, sb :: Int, bb :: Int} deriving (Show, Eq)
 
     {- createDeck: Create a deck in an order -}
     createdDeck :: Deck
@@ -97,7 +99,6 @@ module Poker where
             ranks = map snd hand
             suits = map fst hand 
 
-    --Helper functions 
     isOnePair :: [Rank] -> Bool
     isOnePair ranks = length (twoOfAKind ranks) == 1
 
@@ -116,10 +117,10 @@ module Poker where
     --Helper functions 
     highestRank :: Hand -> Rank
     highestRank hand = maximum (map snd hand)
-
-    --Sort and group by rank into lists and filter lists which their length is 2
+    
     twoOfAKind :: [Rank] -> [Rank] --eg. [Two, Ace]
     twoOfAKind = map head . filter (\x -> length x == 2) . group . sort
+    --Sort and group by rank into lists and filter lists which their length is 2
 
     threeOfAKind :: [Rank] -> [Rank]
     threeOfAKind = map head . filter (\x -> length x == 3) . group . sort
@@ -136,11 +137,85 @@ module Poker where
         in map fst winners  
 
     -- Step3
-    data Strategy = Bet | Call | Raise | Fold
+    data Action = Bet Chip | Call | Raise Chip | Fold deriving(Show, Eq)
 
-    bettingRound :: GameState -> [Player] -> GameState -> [Player] --maybe GameState wouldn't be an input yet just input pot
-    bettingRound = 
-        --call initialising functions ??
+    bettingRound :: GameState -> IO GameState
+    bettingRound gameState = foldM processPlayer gameState (activePlayers gameState)
+
+    {-selectStrategy: select and call player's strategy based on user type-}
+    selectStrategy :: Player -> Chip -> IO Action
+    selectStrategy player currentBet = case playerType player of
+        RandomPlayer -> randomPlayerStrategy player currentBet
+        -- more players to be continued...
+
+    -- have to consider if the previous player has bet or not
+    {-availableActions: determine available actions based on the amount of player's chip-}
+    availableActions :: Player -> Chip -> IO [Action]
+    availableActions player (Chip currentBet)
+        | currentChip < currentBet = return [Fold]
+        | currentChip < currentBet * 2 = do
+            betAmount <- randomRIO (currentBet, currentChip)
+            return [Fold, Bet (Chip betAmount), Call] 
+        | otherwise = do
+            betAmount <- randomRIO (currentBet, currentChip)
+            raiseAmount <- randomRIO(2 * currentBet, currentChip) 
+            return [Fold, Bet (Chip betAmount), Call, Raise (Chip raiseAmount)]
+        where
+            (Chip currentChip) = chip player
+       
+    randomPlayerStrategy :: Player -> Chip -> IO Action
+    randomPlayerStrategy player currentBet = do
+        possibleActions <- availableActions player currentBet
+        randomIndex <- randomRIO (0, length possibleActions - 1)
+        return (possibleActions !! randomIndex)
+
+    processPlayer :: GameState -> Player -> IO GameState
+    processPlayer gameState player = do
+        let currentBet = if null (bets gameState) then Chip 0 else last (bets gameState)
+        action <- selectStrategy player currentBet
+        let updatedGameState = processAction gameState player action currentBet
+        return updatedGameState
+    
+    processAction :: GameState -> Player -> Action -> Chip -> GameState
+    processAction gameState player (Bet (Chip amount)) _ = 
+        let updatedPlayer = player {chip = Chip (currentChip - amount)}
+            updatedPotGameState = updatePotAndBets gameState (Chip amount)
+        in updatePlayer updatedPotGameState updatedPlayer
+            where 
+                Chip currentChip = chip player
+
+    processAction  gameState player Call (Chip currentBet) = 
+        let updatedPlayer = player {chip = Chip (currentChip - currentBet)}
+            updatedPotGameState = updatePotAndBets gameState (Chip currentBet)
+        in updatePlayer updatedPotGameState updatedPlayer
+            where 
+                Chip currentChip = chip player
+
+    processAction gameState player (Raise (Chip amount)) _ =
+        let updatedPlayer = player {chip = Chip (currentChip - amount)}
+            updatedPotGameState = updatePotAndBets gameState (Chip amount)
+        in updatePlayer updatedPotGameState updatedPlayer
+            where 
+                Chip currentChip = chip player
+
+    processAction gameState player Fold _ =
+        updatePlayer gameState player
+    
+    updatePotAndBets :: GameState -> Chip -> GameState
+    updatePotAndBets gameState (Chip amount) = gameState {pot = Chip (currentPot + amount), 
+    bets = bets gameState ++ [Chip amount]}
+        where 
+            Chip currentPot = pot gameState
+
+    updatePlayer :: GameState -> Player -> GameState
+    updatePlayer gameState updatedPlayer =
+        gameState {activePlayers = filter ((/= name updatedPlayer) . name) (activePlayers gameState) ++ [updatedPlayer]} 
+
+    -- updateBets :: GameState -> Chip -> GameState
+    -- updateBets gameState betAmount = gameState {bets = bets gameState ++ [betAmount]}
+        
+    
+
 
 
     {-initialisePlayer: Initialises the Player-}
@@ -150,30 +225,35 @@ module Poker where
             hand' = []
             chip' = chip
             isDealer' = False
-        in Player{name = name, hand = hand', chip = chip, isDealer = isDealer'}
+            playerType' = RandomPlayer -- Should I decided this randomly?
+        in Player{name = name, hand = hand', chip = chip, isDealer = isDealer', playerType = playerType'}
 
 
     {-initialiseGameState: Initialise the GameSate-}
-    initialiseGameState :: [Player] -> Int -> GameState 
-    initialiseGameState players n =  -- rounds of game, 0-3
+    initialiseGameState :: [Player] -> Int -> GameState
+    initialiseGameState activePlayers n =  -- rounds of game, 0-3
         let deck' = createdDeck
             communityCards' = []
-            pot' = 0
+            pot' = Chip 0
             bets' = []
-            dealer' = 0 --have to be decided randomly later 
+            dealer' = 0 --can I just set the pos of dealer as the first one in players 
             sb' = dealer' + 1
             bb' = dealer' + 2
-        in GameState {activePlayers = players, deck = deck', communityCards = communityCards', pot = pot',
+        in GameState {activePlayers = activePlayers, deck = deck', communityCards = communityCards', pot = pot',
                     bets = bets', dealer = dealer', sb = sb', bb = bb'}
 
     main :: IO ()
     main = do
-        let player1 = Player "Alice" [(Hearts, Ace), (Spades, Ace), (Diamonds, King), (Clubs, Queen), (Hearts, Ten)] 100 False
-        let player2 = Player "Bob" [(Clubs, King), (Diamonds, King), (Spades, Queen), (Hearts, Jack), (Spades, Ten)] 100 False
-        let player3 = Player "Charlie" [(Diamonds, Ten), (Clubs, Ten), (Hearts, Nine), (Spades, Eight), (Diamonds, Seven)] 100 False
+        let player1 = Player "Alice" [(Hearts, Ace), (Spades, Ace), (Diamonds, King), (Clubs, Queen), (Hearts, Ten)] (Chip 100) False RandomPlayer
+        let player2 = Player "Bob" [(Clubs, King), (Diamonds, King), (Spades, Queen), (Hearts, Jack), (Spades, Ten)] (Chip 100) False RandomPlayer
+        let player3 = Player "Charlie" [(Diamonds, Ten), (Clubs, Ten), (Hearts, Nine), (Spades, Eight), (Diamonds, Seven)] (Chip 100) False RandomPlayer
         let players = [player1, player2, player3]
 
-        putStrLn $ "Winner(s): " ++ show (map name (determineWinner players))
+        let gameState = initialiseGameState players 0 
+        newState <- bettingRound gameState
+            
+        print newState 
+
 
 
 
