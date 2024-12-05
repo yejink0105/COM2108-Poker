@@ -33,7 +33,7 @@ module Poker where
     cmp :: (a, Int) -> (a, Int) -> Ordering
     cmp (_, y1) (_, y2) = compare y1 y2
 
-    shuffleDeck :: [Card]
+    shuffleDeck :: Deck
     shuffleDeck = [card | (card, _) <- sortBy cmp (zip createdDeck randomNumbers)]
         where
             randomNumbers = randoms (mkStdGen 1234) :: [Int]
@@ -139,16 +139,96 @@ module Poker where
     -- Step3
     data Action = Bet Chip | Call | Raise Chip | Fold deriving(Show, Eq)
 
+    preFlop :: GameState -> IO GameState
+    preFlop gameState = do
+        let originalDeck = shuffleDeck
+            players = activePlayers gameState
+
+        --Deal hole cards & intialise dealer position index
+        (dealerPos, sbPos, bbPos) <- selectDealerSbBbPos players
+        let (playersGivenCards, updatedDeck) = dealCards 2 originalDeck players 
+            updatedDeckGamaeState = gameState {activePlayers = playersGivenCards, 
+            deck = updatedDeck, dealer = dealerPos, sb = sbPos, bb = bbPos}
+        
+        -- remove SB and BB and rearrange players in an order when calling bettingRound 
+        let filteredPlayers = [p | (i, p) <- zip [0..] players, i /= sbPos, i /= bbPos]
+            rearrangedPlayers = rearrangePlayers bbPos filteredPlayers
+            updateBettersGameState = updatedDeckGamaeState {activePlayers = rearrangedPlayers}
+            
+        -- add bet of sb and bb to bets and pot
+        let updatePotAndBetsGameStateSb = updatePotAndBets updateBettersGameState (Chip 1)
+            updatePotAndBetsGameStateBb = updatePotAndBets updatePotAndBetsGameStateSb (Chip 2)
+        gameStateAfterPreFlop <- bettingRound updatePotAndBetsGameStateBb -- How am I gonna exclude bet action 
+
+        let currentPlayers = activePlayers gameStateAfterPreFlop
+        let currentBet = last (bets gameStateAfterPreFlop)
+        let currentPot = pot gameStateAfterPreFlop
+        putStrLn "---------------------------Pre-flop starts---------------------------"
+        putStrLn ("Active players: " ++ show (map name players))
+        putStrLn ("Dealer position: " ++ show dealerPos)
+        putStrLn ("SB position: " ++ show sbPos)
+        putStrLn ("BB position: " ++ show bbPos)
+        putStrLn("Bets:" ++ show (bets gameStateAfterPreFlop))
+        putStrLn ("Current bet: " ++ show currentBet)
+        putStrLn ("Current pot: " ++ show currentPot)
+
+        return gameStateAfterPreFlop
+
+    flop :: GameState -> IO GameState
+    flop gameState = do 
+        let currentDeck = deck gameState
+            players = activePlayers gameState
+            dealerPos = dealer gameState
+            (playersGivenCards, updatedDeck) = dealCards 3 currentDeck players 
+            rearrangedPlayers = rearrangePlayers dealerPos playersGivenCards 
+            updatedGameState = gameState {activePlayers = rearrangedPlayers, deck = updatedDeck}
+        gameStateAfterFlop <- bettingRound updatedGameState
+        let ...
+        return gameStateAfterFlop
+        
+        
+    rearrangePlayers :: Int -> [Player] -> [Player]
+    rearrangePlayers position players = 
+        let firstPlayerPos = (position + 1) `mod` length players 
+            (left, right) = splitAt firstPlayerPos players
+        in right ++ left 
+
+            
+    {-selectDealerSbBbPos: select dealer position randomly and set sb and bb positions accordingly-}
+    selectDealerSbBbPos :: [Player] -> IO (Int, Int, Int)
+    selectDealerSbBbPos players = do
+        let max = length players - 1
+        dealerPos <- randomRIO (0, max)
+        let sbPos = (dealerPos + 1) `mod` length players 
+            bbPos = (dealerPos + 2) `mod` length players
+        return (dealerPos, sbPos, bbPos)
+
     bettingRound :: GameState -> IO GameState
     bettingRound gameState = foldM processPlayer gameState (activePlayers gameState)
+       
+    processPlayer :: GameState -> Player -> IO GameState
+    processPlayer gameState player = do
+        let currentBet = if null (bets gameState) then Chip 0 else last (bets gameState)
+        action <- selectStrategy player currentBet
+        let updatedGameState = processAction gameState player action currentBet
+        return updatedGameState
 
     {-selectStrategy: select and call player's strategy based on user type-}
     selectStrategy :: Player -> Chip -> IO Action
     selectStrategy player currentBet = case playerType player of
         RandomPlayer -> randomPlayerStrategy player currentBet
         -- more players to be continued...
+    
+    randomPlayerStrategy :: Player -> Chip -> IO Action
+    randomPlayerStrategy player currentBet = do
+        possibleActions <- availableActions player currentBet
+        randomIndex <- randomRIO (0, length possibleActions - 1)
+        return (possibleActions !! randomIndex)
 
-    -- have to consider if the previous player has bet or not
+    -- Add a gameastate to availableActions, randomPlayerSrategy, selectStrategy to check if isPreFlop is true and then 
+    -- IF it is true exclude bet from the available actions ??
+
+
     {-availableActions: determine available actions based on the amount of player's chip-}
     availableActions :: Player -> Chip -> IO [Action]
     availableActions player (Chip currentBet)
@@ -162,29 +242,17 @@ module Poker where
             return [Fold, Bet (Chip betAmount), Call, Raise (Chip raiseAmount)]
         where
             (Chip currentChip) = chip player
-       
-    randomPlayerStrategy :: Player -> Chip -> IO Action
-    randomPlayerStrategy player currentBet = do
-        possibleActions <- availableActions player currentBet
-        randomIndex <- randomRIO (0, length possibleActions - 1)
-        return (possibleActions !! randomIndex)
-
-    processPlayer :: GameState -> Player -> IO GameState
-    processPlayer gameState player = do
-        let currentBet = if null (bets gameState) then Chip 0 else last (bets gameState)
-        action <- selectStrategy player currentBet
-        let updatedGameState = processAction gameState player action currentBet
-        return updatedGameState
     
-    processAction :: GameState -> Player -> Action -> Chip -> GameState
-    processAction gameState player (Bet (Chip amount)) _ = 
+    processAction :: GameState -> Player -> Action -> Chip -> IO GameState
+    processAction gameState player (Bet (Chip amount)) _ = do
         let updatedPlayer = player {chip = Chip (currentChip - amount)}
             updatedPotGameState = updatePotAndBets gameState (Chip amount)
-        in updatePlayer updatedPotGameState updatedPlayer
+        putStrLn $ show (name player) ++ " has bet " ++ show amount
+        return $ updatePlayer updatedPotGameState updatedPlayer
             where 
                 Chip currentChip = chip player
-
-    processAction  gameState player Call (Chip currentBet) = 
+    
+    processAction gameState player Call (Chip currentBet) = 
         let updatedPlayer = player {chip = Chip (currentChip - currentBet)}
             updatedPotGameState = updatePotAndBets gameState (Chip currentBet)
         in updatePlayer updatedPotGameState updatedPlayer
@@ -199,7 +267,7 @@ module Poker where
                 Chip currentChip = chip player
 
     processAction gameState player Fold _ =
-        updatePlayer gameState player
+        gameState {activePlayers = filter (/=player) (activePlayers gameState)}
     
     updatePotAndBets :: GameState -> Chip -> GameState
     updatePotAndBets gameState (Chip amount) = gameState {pot = Chip (currentPot + amount), 
@@ -210,11 +278,6 @@ module Poker where
     updatePlayer :: GameState -> Player -> GameState
     updatePlayer gameState updatedPlayer =
         gameState {activePlayers = filter ((/= name updatedPlayer) . name) (activePlayers gameState) ++ [updatedPlayer]} 
-
-    -- updateBets :: GameState -> Chip -> GameState
-    -- updateBets gameState betAmount = gameState {bets = bets gameState ++ [betAmount]}
-        
-    
 
 
 
@@ -230,9 +293,9 @@ module Poker where
 
 
     {-initialiseGameState: Initialise the GameSate-}
-    initialiseGameState :: [Player] -> Int -> GameState
-    initialiseGameState activePlayers n =  -- rounds of game, 0-3
-        let deck' = createdDeck
+    initialiseGameState :: [Player] ->  GameState
+    initialiseGameState activePlayers =  
+        let deck' = []
             communityCards' = []
             pot' = Chip 0
             bets' = []
@@ -244,15 +307,23 @@ module Poker where
 
     main :: IO ()
     main = do
-        let player1 = Player "Alice" [(Hearts, Ace), (Spades, Ace), (Diamonds, King), (Clubs, Queen), (Hearts, Ten)] (Chip 100) False RandomPlayer
-        let player2 = Player "Bob" [(Clubs, King), (Diamonds, King), (Spades, Queen), (Hearts, Jack), (Spades, Ten)] (Chip 100) False RandomPlayer
-        let player3 = Player "Charlie" [(Diamonds, Ten), (Clubs, Ten), (Hearts, Nine), (Spades, Eight), (Diamonds, Seven)] (Chip 100) False RandomPlayer
-        let players = [player1, player2, player3]
+        let player1 = Player "Alice" [] (Chip 100) False RandomPlayer
+        let player2 = Player "Bob" [] (Chip 100) False RandomPlayer
+        let player3 = Player "Charlie" [] (Chip 100) False RandomPlayer
+        let player4 = Player "Nina" [] (Chip 100) False RandomPlayer
+        let player5 = Player "Jack" [] (Chip 100) False RandomPlayer
+        let players = [player1, player2, player3, player4, player5]
 
-        let gameState = initialiseGameState players 0 
-        newState <- bettingRound gameState
-            
-        print newState 
+        putStrLn "Game Starts"
+        let gameState = initialiseGameState players 
+        preFlopState <- preFlop gameState
+
+        --Replace activePlayers with original list of players
+        let addPlayersToState = preFlopState {activePlayers = players}
+        print (activePlayers addPlayersToState)
+        
+        
+
 
 
 
