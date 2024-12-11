@@ -14,7 +14,6 @@ module Poker where
     type Deck = [Card]
     newtype Chip = Chip Int deriving (Show, Eq, Ord)
 
-    --type Community = [Card]
     data PlayerType = RandomPlayer | AggressivePlayer | PassivePlayer | SmartPlayer deriving (Show, Eq)
     type Hand = [Card]
     data Player = Player {name :: String, hand :: Hand, chip :: Chip, 
@@ -32,16 +31,18 @@ module Poker where
             suits = [minBound .. maxBound] :: [Suit]
             ranks = [minBound .. maxBound] :: [Rank]
 
-    {- shuffleDeck: Shuffle a deck of cards randomly -}
+    {-cmp: comparing function to shuffle a deck-}
     cmp :: (a, Int) -> (a, Int) -> Ordering
     cmp (_, y1) (_, y2) = compare y1 y2
 
-    shuffleDeck :: Deck
-    shuffleDeck = [card | (card, _) <- sortBy cmp (zip createdDeck randomNumbers)]
-        where
-            randomNumbers = randoms (mkStdGen 1234) :: [Int] --the seed is constant here need to fix. 
+    {- shuffleDeck: Shuffle a deck of cards randomly -}
+    shuffleDeck :: IO Deck 
+    shuffleDeck = do
+        gen <- newStdGen  
+        let randomNumbers = randoms gen :: [Int]  
+        return [card | (card, _) <- sortBy cmp (zip createdDeck randomNumbers)]
 
-    {- dealCards: Deal the hole and community cards-} --Player's hand is combined of community and private 
+    {- dealCards: Deal the hole and community cards-} --Player's hand is combined with community and hole cards 
     dealCards :: Int -> Deck -> [Player] -> ([Player], Deck)
     dealCards _ deck [] = ([], deck)
     dealCards n deck (p:ps) =
@@ -51,6 +52,7 @@ module Poker where
         in (updatedPlayer : updatedPlayers, finalDeck)
 
     -- Step2
+
     -- types
     data PokerHand 
         = HighCard Rank
@@ -58,7 +60,7 @@ module Poker where
         | TwoPair Rank Rank
         | ThreeOfAKind Rank
         | Straight Rank
-        | Flush [Card]
+        | Flush [Rank]
         | FullHouse Rank Rank
         | FourOfAKind Rank
         | StraightFlush Rank
@@ -71,7 +73,7 @@ module Poker where
         | isStraightFlush hand  = StraightFlush (highestRank hand)
         | isFourOfAKind ranks   = FourOfAKind (head $ fourOfAKind ranks)
         | isFullHouse ranks     = FullHouse (head $ threeOfAKind ranks) (head $ twoOfAKind ranks)
-        | isFlush suits         = Flush hand
+        | isFlush suits         = Flush (flushRanks hand)
         | isStraight ranks      = Straight (highestRank hand)
         | isThreeOfAKind ranks  = ThreeOfAKind (head $ threeOfAKind ranks)
         | isTwoPair ranks       = TwoPair firstPair secondPair
@@ -88,7 +90,7 @@ module Poker where
     isStraight ranks = sort ranks == [head ranks .. last ranks]
 
     isFlush :: [Suit] -> Bool
-    isFlush suits = all (== head suits) suits
+    isFlush suits = any (\suit -> length (filter (== suit) suits) >= 5) (nub suits)
 
     isStraightFlush :: Hand -> Bool
     isStraightFlush hand = isStraight ranks && isFlush suits 
@@ -131,20 +133,30 @@ module Poker where
     fourOfAKind :: [Rank] -> [Rank]
     fourOfAKind = map head . filter (\x -> length x == 4) . group . sort -- takes only head from the sublist 
 
+    flushRanks :: Hand -> [Rank]
+    flushRanks hand = 
+        let suits = map fst hand
+            dominantSuit = head $ head $ filter (\x -> length x >= 5) $ group $ sort suits
+            flushCards = filter (\(suit, _) -> suit == dominantSuit) hand
+        in 
+            take 5 $ sortBy (flip compare) $ map snd flushCards
+
+
     {-determineWinner: determines the winner between multiple players based on their hand rankings-}
     determineWinner :: [Player] -> [Player]
     determineWinner players = 
-        let playerHands = [(p, evaluateHand (hand p)) | p <- players]
-            bestHand = maximumBy (comparing snd) playerHands
+        let playerHands = [(p, evaluateHand (hand p)) | p <- players] -- creates a tuple (Player, PokerHand)
+            bestHand = maximumBy (comparing snd) playerHands -- find single or multiple tuples with best PokerHand
             winners = filter ((== snd bestHand) . snd) playerHands --get all players with equal best hands
-        in map fst winners  
+        in map fst winners
+    -- it actually never gives a fuck about the ranks when PokerHand ties hahahaha
 
     -- Step3
     preFlop :: GameState -> IO GameState
     preFlop gameState = do
         putStrLn "---------------------------PreFlop starts---------------------------"
-        let originalDeck = shuffleDeck
-            players = activePlayers gameState
+        originalDeck <- shuffleDeck
+        let players = activePlayers gameState
 
         --Deal hole cards & intialise dealer position index
         (dealerPos, sbPos, bbPos) <- selectDealerSbBbPos players
@@ -257,11 +269,11 @@ module Poker where
             let currentPot = pot gameState 
                 newGameState = initialiseGameState winners
                 updatePotGameState = newGameState {pot = currentPot} 
-            gameLoop updatePotGameState stages 
+            gameLoop updatePotGameState bettingStages 
 
-    {-stages: a list of betting stages in a round-}
-    stages :: [GameState -> IO GameState]
-    stages = [preFlop, flop, turn, river]
+    {-bettingStages: a list of betting stages in a round-}
+    bettingStages :: [GameState -> IO GameState]
+    bettingStages = [preFlop, flop, turn, river]
 
     endGame :: GameState -> IO ()
     endGame gameState = do
@@ -269,18 +281,20 @@ module Poker where
         putStrLn ("Game Over: the winner is " ++ show winner)
 
     gameLoop :: GameState -> [GameState -> IO GameState] -> IO ()
-    gameLoop gameState [] = gameLoop gameState stages
+    gameLoop gameState [] = gameLoop gameState bettingStages
     gameLoop gameState (stage:remainingStages) 
         | length (activePlayers gameState) <= 1 = endGame gameState
         | otherwise = do
             updatedState <- stage gameState
             if length (activePlayers updatedState) <= 1
                 then endGame updatedState
+                else if null remainingStages && length (activePlayers updatedState) > 1
+                then showdown updatedState
                 else gameLoop updatedState remainingStages
 
     rearrangePlayers :: Int -> [Player] -> [Player]
     rearrangePlayers position players = 
-        let firstPlayerPos = position + 1 `mod` length players 
+        let firstPlayerPos = (position + 1) `mod` length players 
             (left, right) = splitAt firstPlayerPos players
         in right ++ left 
             
@@ -320,8 +334,8 @@ module Poker where
     randomPlayerStrategy :: Player -> Chip -> IO Action     
     randomPlayerStrategy player (Chip currentBet) = do
         let (Chip currentChip) = chip player
-        betAmount <- randomRIO (currentBet, currentChip)
-        raiseAmount <- randomRIO (currentBet, currentChip)
+        betAmount <- randomRIO (0, currentChip)
+        raiseAmount <- randomRIO (currentBet + 1, currentChip)
         let possibleActions
                 | length (hand player) == 2 && currentChip < currentBet = [Fold]
                 | length (hand player) == 2 && currentChip == currentBet = [Fold, Call]
@@ -348,7 +362,7 @@ module Poker where
     aggresivePlayerStrategy player (Chip currentBet) = do
         let (Chip currentChip) = chip player
         betAmount <- randomRIO (0, currentChip)
-        raiseAmount <- randomRIO (currentBet + Chip 1, currentChip)
+        raiseAmount <- randomRIO (currentBet + 1, currentChip)
         let possibleActions 
                 | length (hand player) == 2 && currentChip == currentBet = [Fold, Call]
                 | length (hand player) == 2 = [Fold, Call, Raise (Chip raiseAmount), 
@@ -366,12 +380,65 @@ module Poker where
     smartPlayerStrategy :: Player -> Chip -> IO Action
     smartPlayerStrategy player (Chip currentBet) = do
         let (Chip currentChip) = chip player
-            playerHand = evaluateHand (hand Player)
-            betAmount
-                | playerHand = HighCard
+            playerCards = hand player -- Retrieve the list of cards (Hand)
+            playerHand = evaluateHand playerCards -- Evaluate into a PokerHand
+        return $ case () of
+            _ | currentChip == 0 && currentBet == 0 -> Check
+                | currentChip == 0 && currentBet /= 0 -> Fold
+                | length playerCards == 2 -> -- Pre-Flop
+                    case rateHand playerCards of
+                        Absolute -> Raise (Chip (currentChip `div` 5)) -- Small raise 
+                        Strong   -> Call
+                        _        -> Fold
+                | length playerCards == 5 -> -- Flop
+                        case rateHand playerCards of
+                            Absolute | currentChip /= 0 && currentBet /= 0 -> Call
+                                    | currentChip /= 0 && currentBet == 0 -> Check 
+                            Strong   | currentChip /= 0 && currentBet /= 0 -> Raise (Chip (currentBet + currentChip `div` 3))
+                                    | currentChip /= 0 && currentBet == 0 -> Bet (Chip (currentChip `div` 3))
+                            Mid      | currentChip /= 0 && currentBet /= 0 -> Call
+                                    | currentChip /= 0 && currentBet == 0 -> Check
+                            Weak     | currentChip /= 0 && currentBet /= 0 -> Fold
+                            _ -> Check
+                | length playerCards == 6 -> -- Turn
+                        case rateHand playerCards of
+                            Absolute | currentChip /= 0 && currentBet /= 0 -> Raise (Chip (currentBet + currentChip `div` 2))
+                                    | currentChip /= 0 && currentBet == 0 -> Bet (Chip (currentChip `div` 2))
+                            Strong   | currentChip /= 0 && currentBet /= 0 -> Raise (Chip (currentBet + currentChip `div` 3))
+                                    | currentChip /= 0 && currentBet == 0 -> Bet (Chip (currentChip `div` 3))
+                            Mid      | currentChip /= 0 && currentBet /= 0 -> Call
+                                    | currentChip /= 0 && currentBet == 0 -> Check
+                            Weak     | currentChip /= 0 && currentBet /= 0 -> Fold
+                            _ -> Check
+                | length playerCards == 7 -> -- River
+                        case rateHand playerCards of
+                            Absolute | currentChip /= 0 && currentBet /= 0 -> Raise (Chip (currentBet + currentChip)) --All in
+                                    | currentChip /= 0 && currentBet == 0 -> Bet (Chip currentChip)
+                            Strong   | currentChip /= 0 && currentBet /= 0 -> Raise (Chip (currentBet + currentChip `div` 2))
+                                    | currentChip /= 0 && currentBet == 0 -> Bet (Chip (currentChip `div` 2))
+                            Mid      | currentChip /= 0 && currentBet /= 0 -> Call
+                                    | currentChip /= 0 && currentBet == 0 -> Check
+                            Weak     | currentChip /= 0 && currentBet /= 0 -> Fold
+                            _ -> Check
+                | otherwise -> Fold 
 
 
+    data RateHand = Absolute | Strong | Mid | Weak 
 
+    rateHand :: Hand -> RateHand
+    rateHand hand =
+        let evaluatedHand = evaluateHand hand
+            ranks = map snd hand
+            firstPair = head (twoOfAKind ranks) 
+            secondPair = last (twoOfAKind ranks) 
+            rate
+                | evaluatedHand `elem` [RoyalFlush, StraightFlush (highestRank hand), FourOfAKind (head (fourOfAKind ranks)), 
+                FullHouse (head (threeOfAKind ranks)) (head (twoOfAKind ranks))] = Absolute
+                | evaluatedHand `elem` [Flush (flushRanks hand), Straight (highestRank hand), 
+                ThreeOfAKind (head (threeOfAKind ranks))] = Strong
+                | evaluatedHand == TwoPair firstPair secondPair = Mid
+                | otherwise = Weak
+            in rate
 
     
     processAction :: GameState -> Player -> Action -> Chip -> IO GameState
@@ -465,7 +532,27 @@ module Poker where
 
         let gameState = initialiseGameState players 
         putStrLn "Game Starts"
-        gameLoop gameState stages
+        gameLoop gameState bettingStages
+
+    testDealCards :: IO ()
+    testDealCards :: IO () = do
+        let player1 = Player "Alice" [] (Chip 1000) 
+                False RandomPlayer
+        let player2 = Player "Bob" [] (Chip 1000) False RandomPlayer
+        let player3 = Player "Charlie" [] (Chip 1000) False RandomPlayer
+        let players = [player1, player2, player3]
+
+        let originalDeck = createdDeck
+        shuffledDeck <- shuffleDeck
+        let (updatedPlayers, deck) = dealCards 2 shuffledDeck players
+        
+        let isLengthTwo = all (\p -> length (hand p) == 2) updatedPlayers
+
+        let isDeckupdated = length deck == length originalDeck - length players * 2
+       
+        if isLengthTwo && isDeckupdated then
+            putStrLn "Pass"
+            else putStrLn "Fail"
 
 
 
